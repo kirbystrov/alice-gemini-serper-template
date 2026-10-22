@@ -110,6 +110,7 @@ async function searchWeb(query, timeoutMs) {
   }
 }
 
+
 async function askOpenRouter(text, history, searchContext, timeoutMs) {
   const key = process.env.OPENROUTER_API_KEY;
   if (!key) throw new Error("MISSING_OPENROUTER_KEY");
@@ -119,14 +120,26 @@ async function askOpenRouter(text, history, searchContext, timeoutMs) {
     process.env.OPENROUTER_MODEL || "google/gemma-4-31b-it:free"
   ).trim();
 
+  const models = [
+    model,
+    "google/gemma-4-26b-a4b-it:free",
+    "qwen/qwen3.8-27b:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "thinkingmachines/inkling-small:free",
+    "cohere/north-mini-code:free",
+    "poolside/laguna-s-2.1:free",
+    "liquid/lfm-2.5-2.6b:free"
+  ];
+
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
-
     ...safeHistory(history).map(item => ({
       role: item.role === "model" ? "assistant" : "user",
       content: item.text
     })),
-
     {
       role: "user",
       content: searchContext
@@ -135,81 +148,97 @@ async function askOpenRouter(text, history, searchContext, timeoutMs) {
     }
   ];
 
-  const { response, data } = await fetchJson(
-    "https://openrouter.ai/api/v1/chat/completions",
-    {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${key}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://alice-gemini-serper-template.vercel.app",
-        "X-OpenRouter-Title": "Alice Voice Assistant"
-      },
-      
-      body: JSON.stringify({
-        models: [
-          model,
-          "google/gemma-4-26b-a4b-it:free",
-          "qwen/qwen3.8-27b:free",
-          "nvidia/nemotron-3.5-lightning:free",
-          "nvidia/nemotron-3-super-120b-a12b:free",
-          "nvidia/nemotron-3-ultra-550b-a55b:free",
-          "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-          "thinkingmachines/inkling-small:free",
-          "cohere/north-mini-code:free",
-          "poolside/laguna-s-2.1:free",
-          "liquid/lfm-2.5-2.6b:free"
-        ],
-        messages,
-        temperature: 0.5,
-        max_tokens: 240
-      })
+  const deadline = Date.now() + Math.min(GEMINI_TIMEOUT_MS, timeoutMs);
+  let lastError = "OPENROUTER_REQUEST_FAILED";
 
-    },
-    Math.min(GEMINI_TIMEOUT_MS, timeoutMs)
-  );
+  // OpenRouter допускает максимум 3 модели в одном запросе.
+  for (let i = 0; i < models.length; i += 3) {
+    const remaining = deadline - Date.now();
 
-  if (!response.ok) {
-    console.error(
-      "OpenRouter request failed with HTTP",
-      response.status,
-      data?.error?.message || ""
-    );
-
-    if (response.status === 401 || response.status === 403) {
-      throw new Error("OPENROUTER_KEY_REJECTED");
+    if (remaining < 300) {
+      lastError = "TIME_BUDGET_EXHAUSTED";
+      break;
     }
 
-    if (response.status === 429) {
-      throw new Error("OPENROUTER_QUOTA");
-    }
+    const group = models.slice(i, i + 3);
+    const attemptTimeout = Math.min(900, remaining - 150);
 
-    if (response.status === 402) {
-      throw new Error("OPENROUTER_PAYMENT_REQUIRED");
-    }
+    try {
+      const { response, data } = await fetchJson(
+        "https://openrouter.ai/api/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${key}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://alice-gemini-serper-template.vercel.app",
+            "X-OpenRouter-Title": "Alice Voice Assistant"
+          },
+          body: JSON.stringify({
+            models: group,
+            messages,
+            temperature: 0.5,
+            max_tokens: 240
+          })
+        },
+        attemptTimeout
+      );
 
-    throw new Error("OPENROUTER_REQUEST_FAILED");
+      if (response.ok) {
+        const content = data?.choices?.[0]?.message?.content;
+
+        if (typeof content === "string" && content.trim()) {
+          return content.trim();
+        }
+
+        lastError = "OPENROUTER_EMPTY_RESPONSE";
+        console.warn("OpenRouter returned no text for model group", i / 3 + 1);
+        continue;
+      }
+
+      console.warn(
+        "OpenRouter model group failed:",
+        i / 3 + 1,
+        "HTTP",
+        response.status,
+        data?.error?.message || ""
+      );
+
+      if (response.status === 401 || response.status === 403) {
+        throw new Error("OPENROUTER_KEY_REJECTED");
+      }
+
+      if (response.status === 402) {
+        throw new Error("OPENROUTER_PAYMENT_REQUIRED");
+      }
+
+      if (response.status === 429) {
+        lastError = "OPENROUTER_QUOTA";
+      } else {
+        lastError = "OPENROUTER_REQUEST_FAILED";
+      }
+    } catch (error) {
+      if (
+        error?.message === "OPENROUTER_KEY_REJECTED" ||
+        error?.message === "OPENROUTER_PAYMENT_REQUIRED"
+      ) {
+        throw error;
+      }
+
+      lastError =
+        error?.name === "AbortError"
+          ? "TIME_BUDGET_EXHAUSTED"
+          : error?.message === "OPENROUTER_EMPTY_RESPONSE"
+            ? "OPENROUTER_EMPTY_RESPONSE"
+            : "OPENROUTER_REQUEST_FAILED";
+
+      console.warn("OpenRouter attempt did not finish:", lastError);
+    }
   }
 
-  const choice = data?.choices?.[0];
-  const content = choice?.message?.content;
-  
-  if (typeof content === "string" && content.trim()) {
-    return content.trim();
-  }
-  
-  console.error("OpenRouter returned no text:", JSON.stringify({
-    http_status: response.status,
-    model_requested: model,
-    model_returned: data?.model ?? null,
-    error: data?.error ?? null,
-    choices_count: data?.choices?.length ?? 0,
-    response_keys: Object.keys(data ?? {})
-  }));
-  
-  throw new Error("OPENROUTER_EMPTY_RESPONSE");
-
+  throw new Error(lastError);
 }
+
 
 function errorForUser(error) {
   switch (error?.message) {
