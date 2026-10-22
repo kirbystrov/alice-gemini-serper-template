@@ -2,9 +2,9 @@ const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 const MAX_HISTORY_MESSAGES = 8;
 const MAX_HISTORY_MESSAGE_CHARS = 1200;
 const MAX_ALICE_TEXT = 1024;
-const TOTAL_RESPONSE_BUDGET_MS = 3600;
-const SERPER_TIMEOUT_MS = 600;
-const GEMINI_TIMEOUT_MS = 2500;
+const TOTAL_RESPONSE_BUDGET_MS = 4000;
+const SERPER_TIMEOUT_MS = 500;
+const GEMINI_TIMEOUT_MS = 3000;
 
 const SYSTEM_PROMPT = [
   "Ты — полезный голосовой помощник в навыке Яндекс Алисы.",
@@ -177,13 +177,22 @@ async function askOpenRouter(text, history, searchContext, timeoutMs) {
     throw new Error("OPENROUTER_REQUEST_FAILED");
   }
 
-  const answer = data?.choices?.[0]?.message?.content;
-
-  if (typeof answer !== "string" || !answer.trim()) {
-    throw new Error("OPENROUTER_EMPTY_RESPONSE");
+  const choice = data?.choices?.[0];
+  const content = choice?.message?.content;
+  
+  if (typeof content === "string" && content.trim()) {
+    return content.trim();
   }
+  
+  console.error("OpenRouter returned no text:", JSON.stringify({
+    model: data?.model,
+    finish_reason: choice?.finish_reason,
+    choices_count: data?.choices?.length ?? 0,
+    error: data?.error?.message
+  }));
+  
+  throw new Error("OPENROUTER_EMPTY_RESPONSE");
 
-  return answer.trim();
 }
 
 function errorForUser(error) {
@@ -230,7 +239,11 @@ export default async function handler(req, res) {
   const remainingMs = () => TOTAL_RESPONSE_BUDGET_MS - (Date.now() - startedAt);
   const body = req.body && typeof req.body === "object" ? req.body : {};
   const text = String(body?.request?.command || body?.request?.original_utterance || "").trim();
-  const oldHistory = safeHistory(body?.state?.session?.history);
+  const oldHistory = safeHistory(
+    body?.state?.session?.history ??
+    body?.state?.application?.history ??
+    body?.session_state?.history
+  );
 
   if (!text) {
     return res.status(200).json(aliceResponse(
