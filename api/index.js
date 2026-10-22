@@ -110,81 +110,103 @@ async function searchWeb(query, timeoutMs) {
   }
 }
 
-async function askGemini(text, history, searchContext, timeoutMs) {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error("MISSING_GEMINI_KEY");
+async function askOpenRouter(text, history, searchContext, timeoutMs) {
+  const key = process.env.OPENROUTER_API_KEY;
+  if (!key) throw new Error("MISSING_OPENROUTER_KEY");
   if (timeoutMs < 250) throw new Error("TIME_BUDGET_EXHAUSTED");
 
-  const model = String(process.env.GEMINI_MODEL || DEFAULT_MODEL).trim();
-  if (!/^[A-Za-z0-9._-]+$/.test(model)) throw new Error("INVALID_MODEL_NAME");
+  const model = String(
+    process.env.OPENROUTER_MODEL || "openrouter/free"
+  ).trim();
 
-  const contents = safeHistory(history).map(item => ({
-    role: item.role,
-    parts: [{ text: item.text }]
-  }));
+  const messages = [
+    { role: "system", content: SYSTEM_PROMPT },
 
-  const prompt = searchContext
-    ? `${text}\n\nРезультаты поиска в интернете:\n${searchContext}\nИспользуй их только там, где они относятся к вопросу.`
-    : text;
-  contents.push({ role: "user", parts: [{ text: prompt }] });
+    ...safeHistory(history).map(item => ({
+      role: item.role === "model" ? "assistant" : "user",
+      content: item.text
+    })),
+
+    {
+      role: "user",
+      content: searchContext
+        ? `${text}\n\nРезультаты поиска в интернете:\n${searchContext}\nИспользуй их только там, где они относятся к вопросу.`
+        : text
+    }
+  ];
 
   const { response, data } = await fetchJson(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+    "https://openrouter.ai/api/v1/chat/completions",
     {
       method: "POST",
       headers: {
+        "Authorization": `Bearer ${key}`,
         "Content-Type": "application/json",
-        "x-goog-api-key": key
+        "HTTP-Referer": "https://alice-gemini-serper-template.vercel.app",
+        "X-OpenRouter-Title": "Alice Voice Assistant"
       },
       body: JSON.stringify({
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents,
-        generationConfig: {
-          temperature: 0.5,
-          maxOutputTokens: 240
-        }
+        model,
+        messages,
+        temperature: 0.5,
+        max_tokens: 240
       })
     },
     Math.min(GEMINI_TIMEOUT_MS, timeoutMs)
   );
 
   if (!response.ok) {
-    const status = Number(response.status);
-    console.error("Gemini request failed with HTTP", status);
-    if (status === 401 || status === 403) throw new Error("GEMINI_KEY_REJECTED");
-    if (status === 429) throw new Error("GEMINI_QUOTA");
-    throw new Error("GEMINI_REQUEST_FAILED");
+    console.error(
+      "OpenRouter request failed with HTTP",
+      response.status,
+      data?.error?.message || ""
+    );
+
+    if (response.status === 401 || response.status === 403) {
+      throw new Error("OPENROUTER_KEY_REJECTED");
+    }
+
+    if (response.status === 429) {
+      throw new Error("OPENROUTER_QUOTA");
+    }
+
+    if (response.status === 402) {
+      throw new Error("OPENROUTER_PAYMENT_REQUIRED");
+    }
+
+    throw new Error("OPENROUTER_REQUEST_FAILED");
   }
 
-  const candidate = data?.candidates?.[0];
-  const answer = (candidate?.content?.parts || [])
-    .map(part => typeof part.text === "string" ? part.text : "")
-    .join("")
-    .trim();
+  const answer = data?.choices?.[0]?.message?.content;
 
-  if (!answer) {
-    if (data?.promptFeedback?.blockReason) throw new Error("GEMINI_BLOCKED");
-    throw new Error("GEMINI_EMPTY_RESPONSE");
+  if (typeof answer !== "string" || !answer.trim()) {
+    throw new Error("OPENROUTER_EMPTY_RESPONSE");
   }
-  if (candidate?.finishReason === "MAX_TOKENS") {
-    console.warn("Gemini reached the output token limit.");
-  }
-  return answer;
+
+  return answer.trim();
 }
 
 function errorForUser(error) {
   switch (error?.message) {
-    case "MISSING_GEMINI_KEY":
-      return "Сервер пока не настроен. Проверьте переменную GEMINI_API_KEY в настройках Vercel.";
-    case "GEMINI_KEY_REJECTED":
-      return "Не удалось подключиться к Gemini. Проверьте API-ключ в настройках Vercel.";
-    case "GEMINI_QUOTA":
-      return "Сейчас превышен лимит запросов к Gemini. Попробуйте немного позже.";
-    case "GEMINI_BLOCKED":
-      return "Я не смогла обработать этот запрос. Попробуйте спросить иначе.";
+    case "MISSING_OPENROUTER_KEY":
+      return "Сервер пока не настроен. Проверьте ключ OpenRouter в настройках сервера.";
+
+    case "OPENROUTER_KEY_REJECTED":
+      return "Не удалось подключиться к нейросети. Проверьте ключ OpenRouter.";
+
+    case "OPENROUTER_QUOTA":
+      return "Бесплатная нейросеть сейчас перегружена или достигнут лимит. Попробуйте позже.";
+
+    case "OPENROUTER_PAYMENT_REQUIRED":
+      return "Для выбранной модели требуется оплата. Проверьте, что выбрана бесплатная модель.";
+
+    case "OPENROUTER_EMPTY_RESPONSE":
+      return "Нейросеть не подготовила ответ. Попробуйте спросить иначе.";
+
     case "TIME_BUDGET_EXHAUSTED":
     case "AbortError":
-      return "Не успела подготовить ответ. Попробуйте задать вопрос ещё раз, чуть короче.";
+      return "Не успела подготовить ответ. Попробуйте задать вопрос ещё раз.";
+
     default:
       return "Не получилось получить ответ от нейросети. Попробуйте ещё раз чуть позже.";
   }
@@ -225,7 +247,7 @@ export default async function handler(req, res) {
       searchContext = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, Math.max(0, remainingMs() - 2600)));
     }
 
-    const answer = await askGemini(
+    const answer = await askOpenRouter(
       text,
       oldHistory,
       searchContext,
