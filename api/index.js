@@ -185,10 +185,12 @@ async function askOpenRouter(text, history, searchContext, timeoutMs) {
   }
   
   console.error("OpenRouter returned no text:", JSON.stringify({
-    model: data?.model,
-    finish_reason: choice?.finish_reason,
+    http_status: response.status,
+    model_requested: model,
+    model_returned: data?.model ?? null,
+    error: data?.error ?? null,
     choices_count: data?.choices?.length ?? 0,
-    error: data?.error?.message
+    response_keys: Object.keys(data ?? {})
   }));
   
   throw new Error("OPENROUTER_EMPTY_RESPONSE");
