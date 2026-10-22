@@ -145,12 +145,26 @@ async function askOpenRouter(text, history, searchContext, timeoutMs) {
         "HTTP-Referer": "https://alice-gemini-serper-template.vercel.app",
         "X-OpenRouter-Title": "Alice Voice Assistant"
       },
+      
       body: JSON.stringify({
-        model,
+        models: [
+          model,
+          "google/gemma-4-26b-a4b-it:free",
+          "qwen/qwen3.8-27b:free",
+          "nvidia/nemotron-3.5-lightning:free",
+          "nvidia/nemotron-3-super-120b-a12b:free",
+          "nvidia/nemotron-3-ultra-550b-a55b:free",
+          "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+          "thinkingmachines/inkling-small:free",
+          "cohere/north-mini-code:free",
+          "poolside/laguna-s-2.1:free",
+          "liquid/lfm-2.5-2.6b:free"
+        ],
         messages,
         temperature: 0.5,
         max_tokens: 240
       })
+
     },
     Math.min(GEMINI_TIMEOUT_MS, timeoutMs)
   );
